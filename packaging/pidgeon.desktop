@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=PIDgeon
+GenericName=Analisador de Transport Stream
+Comment=Análise de MPEG-TS / BTS ISDB-Tb, TR 101 290, vídeo ao vivo e gravação
+Exec=@BIN@/pidgeon %f
+Icon=pidgeon
+Terminal=false
+Categories=AudioVideo;Video;Network;Development;
+Keywords=TS;MPEG-TS;BTS;ISDB-T;ISDB-Tb;DVB;multicast;RTP;UDP;TR 101 290;PSI;SI;analisador;
+MimeType=video/mp2t;
+StartupWMClass=pidgeon

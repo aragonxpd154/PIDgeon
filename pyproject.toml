@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pidgeon"
+version = "1.0.0"
+description = "Analisador de MPEG Transport Stream e ISDB-Tb (BTS) para Linux — TR 101 290, PSI/SI, vídeo ao vivo e gravação"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Marcos Santos" }]
+requires-python = ">=3.10"
+dependencies = ["PySide6-Essentials>=6.5,!=6.12.0", "av>=12"]
+keywords = ["mpeg-ts", "isdb-t", "isdb-tb", "bts", "tr101290", "dvb", "broadcast", "multicast", "analyzer"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: X11 Applications :: Qt",
+  "Topic :: Multimedia :: Video",
+  "Intended Audience :: Telecommunications Industry",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+]
+
+[project.urls]
+Homepage = "https://github.com/aragonxpd154/PIDgeon"
+
+[project.scripts]
+pidgeon-cli = "pidgeon.cli:main"
+pidgeon-gerar-teste = "pidgeon.tools.testgen:main"
+pidgeon-enviar = "pidgeon.tools.sender:main"
+
+[project.gui-scripts]
+pidgeon = "pidgeon.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["pidgeon*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
