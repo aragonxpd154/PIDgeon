@@ -126,6 +126,16 @@ def icon(name, size=32, color=None):
         p.drawEllipse(r)
         p.setBrush(c)
         p.drawPie(r, 90 * 16, 180 * 16)
+    elif name == "send":
+        # antena transmitindo
+        p.drawLine(QPointF(s / 2, s * 0.42), QPointF(s * 0.3, s - m))
+        p.drawLine(QPointF(s / 2, s * 0.42), QPointF(s * 0.7, s - m))
+        p.drawLine(QPointF(s * 0.38, s * 0.72), QPointF(s * 0.62, s * 0.72))
+        p.setBrush(c)
+        p.drawEllipse(QPointF(s / 2, s * 0.36), s * 0.06, s * 0.06)
+        p.setBrush(Qt.NoBrush)
+        for k in (0.16, 0.28):
+            p.drawArc(QRectF(s / 2 - s * k, s * 0.36 - s * k, 2 * s * k, 2 * s * k), 30 * 16, 120 * 16)
     elif name == "logo":
         _logo(p, s)
     else:

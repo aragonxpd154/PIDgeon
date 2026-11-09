@@ -23,12 +23,9 @@ jobs:
       - name: Testes
         run: QT_QPA_PLATFORM=offscreen python -m pytest -q
 
-  release:
+  pacotes:
     needs: testes
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,12 +33,91 @@ jobs:
           python-version: "3.12"
       - name: Ferramentas
         run: pip install -r requirements.txt
-      - name: Monta o pacote offline
+      - name: Pacote .deb (Debian / Ubuntu / Zorin OS / Mint)
+        run: bash scripts/build_deb.sh
+      - name: Pacote .zip offline (instalação sem sudo)
         run: bash scripts/build_release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacotes
+          path: |
+            dist/*.deb
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14
+
+  teste-deb:
+    needs: pacotes
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]   # Zorin OS 17 (Python 3.10) e Zorin OS 18 (Python 3.12)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacotes
+          path: dist
+      - name: Instala o .deb com o apt
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ./dist/pidgeon_*_amd64.deb
+      - name: Comandos instalados
+        run: |
+          pidgeon --version
+          pidgeon-gerar-teste /tmp/t.bts --segundos 3
+          pidgeon-gerar /tmp/t.bts -f ts204 -o /tmp/t.ts204 -q
+          pidgeon-gerar /tmp/t.ts204 -f bts204 -o /tmp/remux.bts -q
+          pidgeon-cli /tmp/remux.bts | tee /tmp/rel.txt
+          ! grep -q "\[ERR\]" /tmp/rel.txt
+      - name: Interface (offscreen)
+        run: |
+          QT_QPA_PLATFORM=offscreen timeout 20 /opt/pidgeon/bin/pidgeon-run pidgeon.gui.app --version
+          cat > /tmp/gui.py <<'EOF'
+          import os
+          os.environ["QT_QPA_PLATFORM"] = "offscreen"
+          from PySide6.QtWidgets import QApplication
+          app = QApplication([])
+          from pidgeon.gui.main_window import MainWindow
+          from pidgeon.gui.generator import GeneratorDialog
+          w = MainWindow(); w.show(); d = GeneratorDialog(w, "/tmp/t.bts"); d.show()
+          app.processEvents(); print("GUI OK")
+          EOF
+          PYTHONPATH=/opt/pidgeon/app:/opt/pidgeon/lib/common:$( [ "$(python3 -c 'import sys;print(sys.version_info[1])')" = 10 ] && echo /opt/pidgeon/lib/cp310 || echo /opt/pidgeon/lib/abi3 ) python3 /tmp/gui.py
+      - name: Remove o pacote
+        run: sudo apt-get remove -y pidgeon
+
+  release:
+    needs: [pacotes, teste-deb]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacotes
+          path: dist
+      - name: Notas da versão (do CHANGELOG)
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="$VER" '$0 ~ "^## "v" " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notas.md
+          cat >> notas.md <<EOF
+
+          ### Instalação
+          **Pacote .deb** (Zorin OS 17/18, Ubuntu 22.04/24.04, Debian 12/13, Linux Mint 21/22):
+          \`\`\`bash
+          sudo apt install ./pidgeon_${VER}_amd64.deb
+          \`\`\`
+          **Sem sudo / offline:** baixe \`PIDgeon-${VER}-linux-x86_64.zip\`, extraia e rode \`./install.sh\`.
+          EOF
+          cat notas.md
       - name: Publica a release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: notas.md
           files: |
+            dist/*.deb
             dist/*.zip
             dist/*.sha256
-          generate_release_notes: true

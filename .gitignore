@@ -10,6 +10,8 @@ venv/
 *.ts
 *.bts
 *.m2ts
+*.ts204
+*.bts188
 !tests/**/*.ts
 .idea/
 .vscode/

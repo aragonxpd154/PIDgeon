@@ -3,7 +3,7 @@
 #
 # Instala no usuário atual, sem sudo:
 #   programa   ~/.local/share/pidgeon
-#   comandos   ~/.local/bin/pidgeon, pidgeon-cli, pidgeon-gerar-teste, pidgeon-enviar
+#   comandos   ~/.local/bin/pidgeon, pidgeon-cli, pidgeon-gerar, pidgeon-gerar-teste, pidgeon-enviar
 #   atalho     menu de aplicativos ("PIDgeon")
 #
 # Se a pasta vendor/ existir (pacote de release), instala 100% offline.
@@ -137,9 +137,10 @@ EOF
 }
 mk_launcher pidgeon "pidgeon"
 mk_launcher pidgeon-cli "pidgeon cli"
+mk_launcher pidgeon-gerar "pidgeon.tools.gerar"
 mk_launcher pidgeon-gerar-teste "pidgeon.tools.testgen"
 mk_launcher pidgeon-enviar "pidgeon.tools.sender"
-ok "Comandos em $BIN: pidgeon, pidgeon-cli, pidgeon-gerar-teste, pidgeon-enviar"
+ok "Comandos em $BIN: pidgeon, pidgeon-cli, pidgeon-gerar, pidgeon-gerar-teste, pidgeon-enviar"
 
 # ------------------------------------------------------------------ atalho no menu
 if [ "$SHORTCUT" = 1 ]; then
@@ -195,6 +196,7 @@ cat <<EOF
     pidgeon "rtp://10.0.0.5@232.1.1.1:5000?iface=enp3s0"   SSM numa interface
     pidgeon-cli arquivo.ts -j relatorio.json  análise sem interface
     pidgeon-gerar-teste ~/teste.bts           gera um BTS ISDB-Tb de teste
+    pidgeon-gerar grav.bts -f ts188 -d udp://239.1.1.1:1234   converte e transmite
 EOF
 [ -d "$PREFIX/amostras" ] && echo "    Amostra pronta:  pidgeon $PREFIX/amostras/teste_isdbt.bts"
 echo

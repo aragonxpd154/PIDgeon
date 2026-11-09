@@ -10,6 +10,7 @@ from .psi import SectionAssembler
 from .tables import parse_section, describe_service_type
 from .crc import crc32_mpeg
 from .isdbt import BTSInfo, parse_iip
+from .rs import rs_204_188, looks_like_rs204
 from .names import (WELL_KNOWN_PIDS, SI_PIDS, NULL_PID, IIP_PID, LAYER_NAMES,
                     VIDEO_STREAM_TYPES, AUDIO_STREAM_TYPES, SECTION_STREAM_TYPES,
                     stream_type_name, component_tag_kind, table_name)
@@ -210,6 +211,9 @@ class Analyzer:
             self._stream_t = 0.0
             # ISDB-T / BTS
             self.is_bts = False
+            self.rs204 = None             # 204 bytes: True = TS com paridade RS(204,188), False = BTS
+            self.rs_errors = 0
+            self.rs_checked = 0
             self.layer_counts = [0] * 16
             self.layer_win = [0] * 16
             self.layer_rates = [0.0] * 16
@@ -237,6 +241,17 @@ class Analyzer:
             self.messages = collections.deque(maxlen=5000)
             self.msg_serial = 0
             self.sync_locked = False
+
+    def _check_rs(self, pkts, t):
+        """Verifica a paridade RS(204,188). Ao vivo verifica 1 pacote em cada 4 (custo de CPU)."""
+        enc = rs_204_188()
+        step = 1 if self.clock == "stream" else 4
+        for p in pkts[self.pkt_index % step::step] if step > 1 else pkts:
+            self.rs_checked += 1
+            if enc.encode(p[:188]) != p[188:204]:
+                self.rs_errors += 1
+                if self.rs_errors <= 5 or self.rs_errors % 1000 == 0:
+                    self.log("TS 204: paridade RS(204,188) inválida (%d erro(s) até agora)" % self.rs_errors, "warn")
 
     def mark_discontinuity(self):
         """Reinício deliberado do stream (ex.: loop de arquivo): não conta como erro."""
@@ -275,6 +290,7 @@ class Analyzer:
             self.sync_locked = True
             self.packet_size = size
             self.is_bts = size == 204
+            self.rs204 = None
             label = {188: "TS 188", 204: "204 bytes (BTS / TS com Reed-Solomon)", 192: "M2TS 192"}[size]
             self.log("Sincronizado em pacotes de %s" % label)
         elif kind == "loss":
@@ -306,11 +322,19 @@ class Analyzer:
             if size != self.packet_size:
                 self.packet_size = size
                 self.is_bts = size == 204
+                self.rs204 = None
+            if size == 204 and self.rs204 is None:
+                self.rs204 = looks_like_rs204(pkts[:4])
+                if self.rs204:
+                    self.is_bts = False
+                    self.log("Pacotes de 204 bytes com paridade Reed-Solomon RS(204,188) — TS 204, não é BTS")
             if self.mux_rate is None and size == 204:
                 # BTS ISDB-T tem taxa fixa: 32,507936 Mbps em 204 bytes = 29,958 Mbps em 188
                 self._sec_per_pkt = 204 * 8 / 32507936.507936
             off = 4 if size == 192 else 0
-            bts = size == 204
+            bts = size == 204 and self.is_bts
+            if size == 204 and self.rs204:
+                self._check_rs(pkts, t)
             pids = self.pids
             psi_pids = self.psi_pids
             stream_clock = self.clock != "wall"
@@ -838,10 +862,22 @@ class Analyzer:
             return 0.0
         return max(0.0, self.t - self.start_t)
 
+    def format_name(self):
+        ps = self.packet_size
+        if ps == 204:
+            return "TS 204 (RS)" if self.rs204 else "BTS 204"
+        if ps == 192:
+            return "M2TS 192"
+        if ps == 188:
+            return "BTS 188" if IIP_PID in self.pids else "TS 188"
+        return "-"
+
     def summary(self):
         with self.lock:
             return {
                 "packet_size": self.packet_size,
+                "format": self.format_name(),
+                "rs_parity_errors": self.rs_errors if self.rs204 else None,
                 "packets": self.total,
                 "bitrate_bps": round(self.total_rate),
                 "effective_bitrate_bps": round(self.nonnull_rate),

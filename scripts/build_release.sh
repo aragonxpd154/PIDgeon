@@ -60,6 +60,8 @@ PIDgeon $VER — instalação rápida (offline)
 
 Para remover: ./uninstall.sh
 Requisitos: Linux x86_64 com Python 3.10+ e glibc 2.34+ (Zorin OS 17/18, Ubuntu 22.04/24.04, Debian 12, Mint 21/22).
+
+Preferir o pacote .deb?  sudo apt install ./pidgeon_${VER}_amd64.deb   (na página de Releases)
 EOF
 
 echo "==> Compactando"

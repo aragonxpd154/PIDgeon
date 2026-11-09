@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.aragonxpd154.pidgeon</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>PIDgeon</name>
+  <summary>Analisador e gerador de Transport Stream / ISDB-Tb (BTS)</summary>
+  <description>
+    <p>Analisa TS 188, BTS 204 e M2TS em arquivo, UDP e RTP (multicast e unicast, com FEC SMPTE 2022-1):
+       PIDs, PSI/SI, TR 101 290, camadas ISDB-T, IIP, PCR, vídeo ao vivo e gravação.</p>
+    <p>Gera BTS 204, BTS 188, TS 188 e TS 204 a partir de uma gravação e transmite por UDP puro, RTP ou
+       RTP + FEC para endereço unicast ou grupo multicast.</p>
+  </description>
+  <launchable type="desktop-id">pidgeon.desktop</launchable>
+  <url type="homepage">https://github.com/aragonxpd154/PIDgeon</url>
+  <developer id="io.github.aragonxpd154">
+    <name>Marcos Santos</name>
+  </developer>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Network</category>
+  </categories>
+  <releases>
+    <release version="1.1.0" date="2026-11-09"/>
+    <release version="1.0.0" date="2026-10-27"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

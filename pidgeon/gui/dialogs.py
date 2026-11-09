@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QFormLayout, QComboBox, QLineEdit, QSpinBox, QDialogButtonBox,
-                               QVBoxLayout, QLabel, QHBoxLayout, QWidget)
+                               QVBoxLayout, QLabel, QHBoxLayout, QWidget, QCheckBox)
 
 from ..core.sources import list_interfaces, SourceSpec
 
@@ -44,6 +44,8 @@ class NetworkDialog(QDialog):
         self.buffer.setValue(16)
         self.buffer.setSuffix(" MB")
         form.addRow("Buffer do socket", self.buffer)
+        self.fec = QCheckBox("Recuperar perdas com FEC SMPTE 2022-1 (escuta também porta+2 e porta+4)")
+        form.addRow("FEC", self.fec)
         self.url = QLineEdit()
         self.url.setPlaceholderText("http://servidor/stream.ts")
         form.addRow("URL HTTP", self.url)
@@ -65,6 +67,7 @@ class NetworkDialog(QDialog):
             w.textChanged.connect(self._update)
         for w in (self.port, self.buffer):
             w.valueChanged.connect(self._update)
+        self.fec.toggled.connect(self._update)
         for w in (self.proto, self.iface):
             w.currentIndexChanged.connect(self._update)
         self._update()
@@ -86,6 +89,7 @@ class NetworkDialog(QDialog):
         self.port.setValue(sp.port)
         self.source.setText(sp.source or "")
         self.buffer.setValue(sp.buffer_mb)
+        self.fec.setChecked(sp.fec)
         if sp.iface:
             i = self.iface.findData(sp.iface)
             if i >= 0:
@@ -97,12 +101,16 @@ class NetworkDialog(QDialog):
         scheme = "rtp" if self.proto.currentIndex() == 2 else "udp"
         src = self.source.text().strip()
         host = self.addr.text().strip() or "0.0.0.0"
+        if self.fec.isChecked() and self.proto.currentIndex() != 1:
+            scheme = "rtp"
         url = "%s://%s%s:%d" % (scheme, (src + "@") if src else "", host, self.port.value())
         q = []
         if self.iface.currentData():
             q.append("iface=%s" % self.iface.currentData())
         if self.proto.currentIndex() == 1:
             q.append("rtp=off")
+        if self.fec.isChecked() and self.fec.isEnabled():
+            q.append("fec=on")
         if self.buffer.value() != 16:
             q.append("buffer=%d" % self.buffer.value())
         if q:
@@ -113,6 +121,7 @@ class NetworkDialog(QDialog):
         http = self.proto.currentIndex() == 3
         for w in (self.addr, self.port, self.iface, self.source, self.buffer):
             w.setEnabled(not http)
+        self.fec.setEnabled(not http and self.proto.currentIndex() != 1)
         self.url.setEnabled(http)
         self.preview.setText(self.value())
 
@@ -125,7 +134,8 @@ class AboutDialog(QDialog):
         t = QLabel("<h2>PIDgeon %s</h2>"
                    "<p>Analisador de MPEG Transport Stream e ISDB-Tb para Linux.</p>"
                    "<p>TS 188 · BTS 204 · M2TS 192 · UDP/RTP multicast e unicast · PSI/SI · "
-                   "TR 101 290 · camadas ISDB-T e IIP · vídeo ao vivo · gravação.</p>"
+                   "TR 101 290 · camadas ISDB-T e IIP · vídeo ao vivo · gravação · geração de BTS/TS "
+                   "e transmissão UDP/RTP com FEC SMPTE 2022-1.</p>"
                    "<p>Autor: Marcos Santos — github.com/aragonxpd154<br>Licença GPL-3.0.</p>" % version)
         t.setWordWrap(True)
         t.setTextFormat(Qt.RichText)

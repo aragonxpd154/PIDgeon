@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import selectors
 import socket
 import struct
 import sys
@@ -68,6 +69,7 @@ class SourceSpec:
       udp://10.0.0.5@232.1.1.1:5000  SSM: fonte 10.0.0.5
       udp://:1234  ou udp://0.0.0.0:1234   unicast em todas as interfaces
       udp://239.1.1.1:1234?iface=enp3s0&buffer=16
+      rtp://239.1.1.1:5000?fec=on    RTP + recuperação FEC SMPTE 2022-1 (portas +2 e +4)
       http://servidor/stream.ts
       -                              stdin
     """
@@ -82,6 +84,7 @@ class SourceSpec:
         self.iface = None
         self.rtp = "auto"
         self.buffer_mb = 16
+        self.fec = False
         self.url = None
         t = self.text
         low = t.lower()
@@ -109,6 +112,11 @@ class SourceSpec:
                 self.rtp = q["rtp"][0]
             if "buffer" in q:
                 self.buffer_mb = int(q["buffer"][0])
+            if "fec" in q:
+                self.fec = q["fec"][0].lower() not in ("0", "off", "nao", "não", "false")
+                if self.fec and self.rtp == "auto":
+                    self.rtp = "on"
+
         elif low.startswith(("http://", "https://")):
             self.kind = "http"
             self.url = t
@@ -124,6 +132,8 @@ class SourceSpec:
             s = "%s %s %s:%d" % (proto, mode, self.group, self.port)
             if self.source:
                 s += " (SSM fonte %s)" % self.source
+            if self.fec:
+                s += " + FEC 2022-1 (portas %d/%d)" % (self.port + 2, self.port + 4)
             if self.iface:
                 s += " via %s" % self.iface
             return s
@@ -228,8 +238,9 @@ class UdpSource(BaseSource):
         self.rtp_pt = None
         self.sock = None
 
-    def _open(self):
+    def _open(self, port=None, quiet=False):
         sp = self.spec
+        port = port or sp.port
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -243,7 +254,7 @@ class UdpSource(BaseSource):
         local_ip = iface_ip(sp.iface)
         mc = is_multicast(sp.group)
         if mc:
-            sock.bind((sp.group, sp.port))
+            sock.bind((sp.group, port))
             try:
                 sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
             except OSError:
@@ -256,12 +267,14 @@ class UdpSource(BaseSource):
             else:
                 mreq = socket.inet_aton(sp.group) + socket.inet_aton(local_ip)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            self.an.log("IGMP join %s%s na interface %s" % (
-                sp.group, (" (SSM fonte %s)" % sp.source) if sp.source else "", local_ip))
+            if not quiet:
+                self.an.log("IGMP join %s%s na interface %s" % (
+                    sp.group, (" (SSM fonte %s)" % sp.source) if sp.source else "", local_ip))
         else:
             bind_ip = sp.group if sp.group not in ("", "0.0.0.0") else local_ip
-            sock.bind((bind_ip, sp.port))
-            self.an.log("Escutando UDP unicast em %s:%d" % (bind_ip, sp.port))
+            sock.bind((bind_ip, port))
+            if not quiet:
+                self.an.log("Escutando UDP unicast em %s:%d" % (bind_ip, port))
         sock.settimeout(1.0)
         return sock
 
@@ -297,6 +310,8 @@ class UdpSource(BaseSource):
         return d[hdr:end]
 
     def loop(self):
+        if self.spec.fec:
+            return self._loop_fec()
         self.sock = self._open()
         buf = bytearray(65536)
         view = memoryview(buf)
@@ -316,6 +331,72 @@ class UdpSource(BaseSource):
                 self.an.push_bytes(data, time.monotonic())
         finally:
             self.sock.close()
+
+
+    def _loop_fec(self):
+        """RTP com FEC SMPTE 2022-1: mídia na porta, colunas na porta+2 e linhas na porta+4."""
+        from .fec import RtpFecReceiver, FecPacket, parse_rtp
+        sp = self.spec
+        self.sock = self._open()
+        fec_socks = [self._open(sp.port + 2, quiet=True), self._open(sp.port + 4, quiet=True)]
+        self.fec_rx = rx = RtpFecReceiver()
+        self.an.log("FEC SMPTE 2022-1 ativo: colunas na porta %d, linhas na porta %d" % (sp.port + 2, sp.port + 4))
+        for s in [self.sock] + fec_socks:
+            s.setblocking(False)
+        sel = selectors.DefaultSelector()
+        sel.register(self.sock, selectors.EVENT_READ, "m")
+        for s in fec_socks:
+            sel.register(s, selectors.EVENT_READ, "f")
+        last_report = time.monotonic()
+        reported = (0, 0)
+        try:
+            while not self.stop_ev.is_set():
+                ev = sel.select(1.0)
+                if not ev:
+                    self._signal(False)
+                    continue
+                # lê primeiro toda a mídia disponível, depois o FEC (evita processar o FEC antes
+                # dos datagramas que ele protege e que ainda estão no buffer do socket)
+                datagrams = []
+                for key, _ in sorted(ev, key=lambda e: e[0].data != "m"):
+                    for _ in range(256):
+                        try:
+                            datagrams.append((key.data, key.fileobj.recv(65536)))
+                        except (BlockingIOError, InterruptedError):
+                            break
+                        except OSError:
+                            break
+                for kind, d in datagrams:
+                    if kind == "m":
+                        self._signal(True)
+                        self.datagrams += 1
+                        self.bytes += len(d)
+                        r = parse_rtp(d)
+                        if r is None:
+                            self.an.push_bytes(d, time.monotonic())
+                            continue
+                        if self.rtp_detected is not True:
+                            self.rtp_detected = True
+                            self.rtp_pt = r[2]
+                            self.an.log("Encapsulamento: RTP (payload type %d) com FEC" % self.rtp_pt)
+                        out = rx.media(r[0], r[2], r[1], r[4])
+                    else:
+                        f = FecPacket.parse(d)
+                        out = rx.fec(f) if f else []
+                    if out:
+                        self.an.push_bytes(b"".join(out), time.monotonic())
+                self.rtp_lost = rx.lost
+                now = time.monotonic()
+                if now - last_report > 5 and (rx.recovered, rx.lost) != reported:
+                    last_report = now
+                    reported = (rx.recovered, rx.lost)
+                    self.an.log("FEC: %d datagrama(s) recuperado(s), %d perdido(s) sem recuperação "
+                                "(L=%s D=%s)" % (rx.recovered, rx.lost, rx.dec.L, rx.dec.D),
+                                "warn" if rx.lost else "info")
+        finally:
+            self.sock.close()
+            for s in fec_socks:
+                s.close()
 
 
 class HttpSource(BaseSource):

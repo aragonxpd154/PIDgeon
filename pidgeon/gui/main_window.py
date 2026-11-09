@@ -246,6 +246,9 @@ class MainWindow(QMainWindow):
         g.addWidget(big_button("Relatório", "save", self.export_report, tip="Exportar relatório JSON"))
         h.addWidget(ribbon_group("Análise", g))
         g = QHBoxLayout()
+        g.addWidget(big_button("Gerar / Tx", "send", self.open_generator,
+                               tip="Gera BTS 204, BTS 188, TS 188 ou TS 204 a partir de uma gravação e grava "
+                                   "ou transmite por UDP / RTP / RTP + FEC (unicast ou multicast)"))
         g.addWidget(big_button("Gerar teste", "isdb", self.generate_test,
                                tip="Gera um BTS ISDB-Tb sintético (HD camada B + 1-seg camada A)"))
         g.addWidget(big_button("Sobre", "logo", lambda: AboutDialog(self, __version__).exec()))
@@ -354,6 +357,11 @@ class MainWindow(QMainWindow):
         self.rec_status = QLabel("Parado")
         g.addWidget(self.rec_status)
         h.addWidget(ribbon_group("Destino", g))
+        g = QHBoxLayout()
+        g.addWidget(big_button("Gerar / Tx", "send", self.open_generator,
+                               tip="Converte uma gravação em BTS 204 / BTS 188 / TS 188 / TS 204 e grava ou "
+                                   "transmite por UDP / RTP / RTP + FEC"))
+        h.addWidget(ribbon_group("A partir da gravação", g))
         h.addStretch(1)
         self.ribbon.addTab(rec, "Gravação")
 
@@ -970,6 +978,24 @@ class MainWindow(QMainWindow):
                 w.writerow([e.code, e.priority, e.name, e.count,
                             e.last_wall.strftime("%Y-%m-%d %H:%M:%S") if e.last_wall else "", e.last_msg])
 
+    def open_generator(self):
+        from .generator import GeneratorDialog
+        src = None
+        sp = getattr(self.src, "spec", None)
+        if sp is not None and sp.kind == "file":
+            src = sp.path
+        elif self.recorder is not None and self.recorder.files:
+            src = self.recorder.files[-1]
+        dlg = getattr(self, "_gen_dlg", None)
+        if dlg is None:
+            dlg = self._gen_dlg = GeneratorDialog(self, src, open_cb=self.open_input)
+        elif src and not (dlg.thread and dlg.thread.is_alive()):
+            dlg.src.setText(src)
+            dlg._probe()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     def generate_test(self):
         path, _ = QFileDialog.getSaveFileName(self, "Gerar stream de teste ISDB-Tb",
                                               os.path.expanduser("~/pidgeon_teste.bts"),
@@ -1081,7 +1107,7 @@ class MainWindow(QMainWindow):
         occ = (100.0 * an.nonnull_rate / an.total_rate) if an.total_rate else 0
         self.st_rate.setText("%s bps / %.1f%%" % (fmt_int(an.total_rate), occ))
         self.st_rate.setToolTip("Taxa TS (188) e ocupação útil (sem pacotes nulos)")
-        self.st_fmt.setText("BTS ISDB-T" if an.is_bts else ("M2TS" if an.packet_size == 192 else "MPEG-TS"))
+        self.st_fmt.setText(an.format_name() if an.packet_size else "-")
         tot = an.tot_now()
         self.st_tot.setText(("TOT %s" % tot.strftime("%d/%m/%Y %H:%M:%S")) if tot else "")
         if self.src is not None and self.src.finished and not self.src.error:
@@ -1309,6 +1335,11 @@ class MainWindow(QMainWindow):
             rows += [("Datagramas", fmt_int(src.datagrams)),
                      ("Encapsulamento", "RTP (PT %s)" % src.rtp_pt if src.rtp_detected else "UDP"),
                      ("Datagramas RTP perdidos", fmt_int(src.rtp_lost))]
+            fx = getattr(src, "fec_rx", None)
+            if fx is not None:
+                rows += [("FEC 2022-1 (L × D)", "%s × %s" % (fx.dec.L or "?", fx.dec.D or "?")),
+                         ("Pacotes FEC recebidos", fmt_int(fx.fec_packets)),
+                         ("Datagramas recuperados pelo FEC", fmt_int(fx.recovered))]
         if an.framer.sync_losses or an.framer.bytes_skipped:
             rows += [("Perdas de sync", an.framer.sync_losses), ("Bytes descartados", fmt_int(an.framer.bytes_skipped))]
         sec("Entrada", rows)

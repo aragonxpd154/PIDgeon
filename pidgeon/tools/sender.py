@@ -1,66 +1,45 @@
 """Envia um arquivo TS/BTS por UDP ou RTP (unicast/multicast) na taxa do mux — útil para testes.
 
-Uso:  python -m pidgeon.tools.sender arquivo.bts 239.1.1.1:1234 [--rtp] [--ttl 4] [--iface IP] [--loop]
+Mantido por compatibilidade; o pidgeon-gerar faz o mesmo e muito mais (conversão de formato,
+RTP + FEC SMPTE 2022-1, DSCP, interface de saída).
+
+Uso:  pidgeon-enviar arquivo.bts 239.1.1.1:1234 [--rtp] [--fec 10x10] [--ttl 4] [--iface IP] [--loop]
 """
 
 import argparse
-import socket
-import struct
-import time
+
+from ..core.convert import Generator, GenConfig, probe
+from ..core.netout import NetConfig
 
 
-def send(path, dest, rtp=False, ttl=4, iface=None, loop=False, rate=None, seconds=None):
+def send(path, dest, rtp=False, ttl=4, iface=None, loop=False, rate=None, seconds=None, fec=None, log=None):
     host, port = dest.rsplit(":", 1)
-    port = int(port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-    if iface:
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(iface))
-    with open(path, "rb") as f:
-        head = f.read(204 * 6)
-    size = 204 if all(head[i * 204] == 0x47 for i in range(5)) and not all(
-        head[i * 188] == 0x47 for i in range(6)) else 188
-    if rate is None:
-        rate = 32507936.5 if size == 204 else 20e6
-    chunk = size * 7
-    seq = 0
-    ssrc = 0x50494447
-    t_start = time.monotonic()
-    while True:
-        with open(path, "rb") as f:
-            start = time.monotonic()
-            sent = 0
-            while True:
-                data = f.read(chunk)
-                if not data:
-                    break
-                if rtp:
-                    ts90 = int((time.monotonic() - t_start) * 90000) & 0xFFFFFFFF
-                    data = struct.pack("!BBHII", 0x80, 33, seq & 0xFFFF, ts90, ssrc) + data
-                    seq += 1
-                sock.sendto(data, (host, port))
-                sent += len(data)
-                ahead = start + sent * 8 / rate - time.monotonic()
-                if ahead > 0:
-                    time.sleep(ahead)
-                if seconds and time.monotonic() - t_start > seconds:
-                    return
-        if not loop:
-            break
+    pr = probe(path)
+    net = NetConfig(host=host, port=int(port), proto="rtp" if rtp else "udp", iface=iface, ttl=ttl)
+    if fec:
+        c, _, r = fec.lower().partition("x")
+        net.proto, net.fec_cols, net.fec_rows = "rtp-fec", int(c), int(r or c)
+    cfg = GenConfig(source=path, fmt="original", net=net, loop=loop, rate_bps=rate, seconds=seconds)
+    gen = Generator(cfg, pr, log=log)
+    gen.run()
+    return gen.stats
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Envia TS/BTS por UDP/RTP")
+    ap = argparse.ArgumentParser(description="Envia TS/BTS por UDP/RTP (formato original)")
     ap.add_argument("arquivo")
     ap.add_argument("destino", help="ip:porta (unicast ou multicast)")
     ap.add_argument("--rtp", action="store_true")
+    ap.add_argument("--fec", help="RTP + FEC SMPTE 2022-1 LxD (ex.: 10x10)")
     ap.add_argument("--ttl", type=int, default=4)
-    ap.add_argument("--iface", help="IP local para saída multicast")
+    ap.add_argument("--iface", help="IP ou nome da interface de saída")
     ap.add_argument("--loop", action="store_true")
-    ap.add_argument("--taxa", type=float, help="bps (padrão: 32,5 Mbps p/ BTS, 20 Mbps p/ TS)")
+    ap.add_argument("--taxa", type=float, help="bps (só para TS sem PCR)")
     a = ap.parse_args(argv)
-    send(a.arquivo, a.destino, a.rtp, a.ttl, a.iface, a.loop, a.taxa)
+    try:
+        send(a.arquivo, a.destino, a.rtp or bool(a.fec), a.ttl, a.iface, a.loop, a.taxa, fec=a.fec, log=print)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
