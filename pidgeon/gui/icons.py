@@ -126,6 +126,13 @@ def icon(name, size=32, color=None):
         p.drawEllipse(r)
         p.setBrush(c)
         p.drawPie(r, 90 * 16, 180 * 16)
+    elif name == "diag":
+        # placa de rede com lupa
+        p.drawRect(QRectF(m, s * 0.22, s * 0.52, s * 0.36))
+        for k in range(3):
+            p.drawLine(QPointF(m + s * (0.1 + 0.14 * k), s * 0.58), QPointF(m + s * (0.1 + 0.14 * k), s * 0.7))
+        p.drawEllipse(QPointF(s * 0.66, s * 0.6), s * 0.16, s * 0.16)
+        p.drawLine(QPointF(s * 0.77, s * 0.72), QPointF(s - m, s - m))
     elif name == "send":
         # antena transmitindo
         p.drawLine(QPointF(s / 2, s * 0.42), QPointF(s * 0.3, s - m))

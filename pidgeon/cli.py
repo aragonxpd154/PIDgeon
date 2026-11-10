@@ -100,19 +100,49 @@ def print_report(an):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pidgeon-cli", description="PIDgeon — análise de TS/BTS sem interface")
-    ap.add_argument("fonte", help="arquivo, udp://grupo:porta, rtp://…, http://… ou - (stdin)")
+    ap.add_argument("fonte", nargs="?", help="arquivo, udp://grupo:porta, rtp://…, http://… ou - (stdin)")
+    ap.add_argument("--interfaces", action="store_true", help="lista os adaptadores de rede e sai")
+    ap.add_argument("--diagnostico", action="store_true",
+                    help="diagnóstico de rede (adaptadores, join IGMP, rp_filter, firewall) para a fonte informada")
     ap.add_argument("-s", "--segundos", type=float, help="tempo de análise")
     ap.add_argument("--tempo-real", action="store_true", help="lê arquivos na taxa do mux")
     ap.add_argument("-j", "--json", help="salva relatório JSON")
     ap.add_argument("-v", "--verbose", action="store_true", help="mostra mensagens")
     ap.add_argument("--version", action="version", version="PIDgeon %s" % __version__)
     a = ap.parse_args(argv)
+    if a.interfaces or a.diagnostico:
+        return net_report(a)
+    if not a.fonte:
+        ap.error("informe a fonte (arquivo ou udp://grupo:porta)")
     an = run_analysis(a.fonte, a.segundos, fast=not a.tempo_real, verbose=a.verbose)
     print_report(an)
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump(an.to_report(), f, ensure_ascii=False, indent=2, default=str)
         print("\nRelatório salvo em %s" % a.json)
+
+
+def net_report(a):
+    from .core import netif
+    from .core.sources import SourceSpec
+    print("Adaptadores de rede:")
+    for i in netif.interfaces():
+        if not i.virtual or i.ipv4:
+            print("  %s %s" % ("✔" if i.usable else "·", i.label()))
+    auto = netif.auto_join_set()
+    print("Automático usaria: %s" % (", ".join(i.name for i in auto) or "nenhum"))
+    if not a.diagnostico:
+        return 0
+    group = port = iface = None
+    if a.fonte:
+        sp = SourceSpec(a.fonte)
+        if sp.kind == "udp":
+            group, port, iface = sp.group, sp.port, sp.iface
+    print("\nDiagnóstico%s:" % ((" de %s:%s" % (group, port)) if group else ""))
+    sym = {"ok": "✔", "info": "ℹ", "warn": "⚠", "erro": "✘"}
+    for lvl, text in netif.diagnose(group, port, iface):
+        print("  %s %s" % (sym.get(lvl, "•"), text))
+    return 0
 
 
 if __name__ == "__main__":

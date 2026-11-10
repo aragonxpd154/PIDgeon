@@ -220,6 +220,8 @@ class MainWindow(QMainWindow):
         g = QHBoxLayout()
         g.addWidget(big_button("Arquivo", "file", self.open_file, tip="Abrir arquivo .ts/.bts/.trp/.m2ts (Ctrl+O)"))
         g.addWidget(big_button("Rede", "network", self.open_network, tip="UDP/RTP multicast/unicast, HTTP (Ctrl+N)"))
+        g.addWidget(big_button("Diagnóstico", "diag", self.open_netdiag,
+                               tip="Adaptadores de rede, IGMP, rp_filter e firewall — por que o fluxo não chega?"))
         self.recent_btn = big_button("Recentes", "reset")
         self.recent_menu = QMenu(self)
         self.recent_btn.setMenu(self.recent_menu)
@@ -612,9 +614,11 @@ class MainWindow(QMainWindow):
         self.st_rate = QLabel("-")
         self.st_fmt = QLabel("-")
         self.st_input = QLabel("-")
+        self.st_iface = QLabel("")
+        self.st_iface.setToolTip("Adaptador de rede em uso (acompanha a troca de placa e de cabo)")
         self.st_rec = QLabel("")
         self.st_tot = QLabel("")
-        for w in (self.st_size, self.st_rate, self.st_fmt, self.st_input, self.st_rec, self.st_tot):
+        for w in (self.st_size, self.st_rate, self.st_fmt, self.st_input, self.st_iface, self.st_rec, self.st_tot):
             sb.addPermanentWidget(w)
 
     # ================================================================ entrada
@@ -665,9 +669,20 @@ class MainWindow(QMainWindow):
         self.an = Analyzer(clock="stream" if spec.kind == "file" else "wall")
         try:
             self.src = open_source(text, self.an, realtime=not fast, loop=self.loop_chk.isChecked())
+            if hasattr(self.src, "prepare"):
+                self.src.prepare()          # abre o socket e faz o join agora: erros aparecem aqui
         except Exception as exc:
-            QMessageBox.critical(self, "Erro ao abrir", str(exc))
             self.an = None
+            self.src = None
+            if spec.kind == "udp":
+                box = QMessageBox(QMessageBox.Critical, "Não foi possível abrir o fluxo", str(exc), parent=self)
+                diag = box.addButton("Diagnóstico de rede…", QMessageBox.ActionRole)
+                box.addButton(QMessageBox.Close)
+                box.exec()
+                if box.clickedButton() is diag:
+                    self.open_netdiag(spec)
+            else:
+                QMessageBox.critical(self, "Erro ao abrir", str(exc))
             return
         self.input_label = spec.label()
         self.an.log("PIDgeon %s — entrada: %s" % (__version__, self.input_label))
@@ -978,6 +993,14 @@ class MainWindow(QMainWindow):
                 w.writerow([e.code, e.priority, e.name, e.count,
                             e.last_wall.strftime("%Y-%m-%d %H:%M:%S") if e.last_wall else "", e.last_msg])
 
+    def open_netdiag(self, spec=None):
+        from .netwidgets import NetDiagDialog
+        sp = spec if spec is not None and not isinstance(spec, bool) else getattr(self.src, "spec", None)
+        group, port, iface = "239.1.1.1", 1234, ""
+        if sp is not None and getattr(sp, "kind", None) == "udp":
+            group, port, iface = sp.group, sp.port, sp.iface or ""
+        NetDiagDialog(self, group, port, iface).exec()
+
     def open_generator(self):
         from .generator import GeneratorDialog
         src = None
@@ -1108,6 +1131,8 @@ class MainWindow(QMainWindow):
         self.st_rate.setText("%s bps / %.1f%%" % (fmt_int(an.total_rate), occ))
         self.st_rate.setToolTip("Taxa TS (188) e ocupação útil (sem pacotes nulos)")
         self.st_fmt.setText(an.format_name() if an.packet_size else "-")
+        st = getattr(self.src, "iface_status", None)
+        self.st_iface.setText(("🖧 " + st()) if st else "")
         tot = an.tot_now()
         self.st_tot.setText(("TOT %s" % tot.strftime("%d/%m/%Y %H:%M:%S")) if tot else "")
         if self.src is not None and self.src.finished and not self.src.error:
@@ -1332,7 +1357,9 @@ class MainWindow(QMainWindow):
                 ("Bytes recebidos", fmt_int(an.bytes_in)), ("Pacotes", fmt_int(an.total)),
                 ("Tempo de análise", str(datetime.timedelta(seconds=int(an.elapsed()))))]
         if src is not None and hasattr(src, "rtp_detected"):
-            rows += [("Datagramas", fmt_int(src.datagrams)),
+            rows += [("Adaptador de rede", src.iface_status()),
+                     ("Joins refeitos (troca de adaptador/cabo)", fmt_int(src.rejoins)),
+                     ("Datagramas", fmt_int(src.datagrams)),
                      ("Encapsulamento", "RTP (PT %s)" % src.rtp_pt if src.rtp_detected else "UDP"),
                      ("Datagramas RTP perdidos", fmt_int(src.rtp_lost))]
             fx = getattr(src, "fec_rx", None)

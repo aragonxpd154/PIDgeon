@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pidgeon"
-version = "1.1.0"
+version = "1.2.0"
 description = "Analisador e gerador de MPEG Transport Stream e ISDB-Tb (BTS) para Linux — TR 101 290, PSI/SI, vídeo ao vivo, gravação e transmissão UDP/RTP/FEC"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

@@ -249,6 +249,8 @@ class BtsMux:
         self.packets_in = 0
         self.max_late = 0.0
         self.pcr_state = {}
+        self.pcr_out = {}
+        self.pcr_inserted = 0
 
     # ------------------------------------------------------------ entrada
     def push(self, t, pkt):
@@ -283,6 +285,38 @@ class BtsMux:
         self.pcr_state[pid] = [off, pcr]
         return now + off
 
+    PCR_GAP = 0.030      # s: insere PCR antes de chegar aos 40 ms da TR 101 290 (2.3a)
+
+    def _pcr_track(self, pkt, layer, t_slot, has_pcr):
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        st = self.pcr_out.get(pid)
+        if has_pcr:
+            if st is None:
+                st = self.pcr_out[pid] = {"layer": layer}
+            st["t"] = t_slot
+        if st is not None:
+            st["cc"] = pkt[3] & 0x0F
+
+    def _pcr_insert(self, layer, t_slot, q, i):
+        """Pacote só com adaptation field + PCR (CC não incrementa) quando um PID de PCR da camada
+        ficaria mais de PCR_GAP sem PCR — os picos de taxa (quadros I) atrasam o pacote original."""
+        for pid, st in self.pcr_out.items():
+            if st["layer"] != layer or t_slot - st["t"] <= self.PCR_GAP or pid not in self.pcr_state:
+                continue
+            if i < len(q):
+                head = q[i][1]
+                if ((head[1] & 0x1F) << 8 | head[2]) == pid and pcr_of(head) is not None \
+                        and q[i][0] + self.delay <= t_slot:
+                    continue          # o PCR original já sai neste slot
+            off = self.pcr_state[pid][0]
+            pcr = (int(round(t_slot * 27e6)) + off) % PCR_WRAP
+            pkt = bytes((0x47, (pid >> 8) & 0x1F, pid & 0xFF, 0x20 | st["cc"], 183, 0x10)) + bytes(6) + \
+                b"\xff" * 176
+            st["t"] = t_slot
+            self.pcr_inserted += 1
+            return with_pcr(pkt, pcr)
+        return None
+
     def horizon(self):
         """Tempo de entrada até onde os slots já podem ser decididos."""
         return self.slot * TSP_PERIOD - self.delay
@@ -316,6 +350,8 @@ class BtsMux:
             elif layer:
                 q = self.queues[layer]
                 i = self.qpos[layer]
+                pkt = self._pcr_insert(layer, t_slot, q, i)
+            if layer and layer != 8 and pkt is None:
                 # descarta o que está atrasado demais (camada sobrecarregada)
                 while i < len(q) and t_slot - (q[i][0] + self.delay) > 2.0:
                     i += 1
@@ -333,6 +369,7 @@ class BtsMux:
                     pcr = pcr_of(pkt)
                     if pcr is not None:
                         pkt = with_pcr(pkt, self._restamp(pkt, pcr, t_slot, t_in))
+                    self._pcr_track(pkt, layer, t_slot, pcr is not None)
                 if i > 4096:
                     del q[:i]
                     i = 0

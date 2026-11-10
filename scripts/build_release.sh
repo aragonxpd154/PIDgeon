@@ -23,21 +23,8 @@ pip download -q --only-binary=:all: --no-deps "${PLAT[@]}" --python-version 3.10
 pip download -q --only-binary=:all: --no-deps "${PLAT[@]}" --python-version 3.11 --implementation cp \
     -d "$OUT/vendor/wheels/cp311" av
 
-echo "==> Bibliotecas xcb do Qt (Ubuntu 22.04 / jammy, glibc >= 2.14)"
-TMP="$(mktemp -d)"
-B=http://archive.ubuntu.com/ubuntu/pool
-for p in universe/x/xcb-util-cursor/libxcb-cursor0_0.1.1-4ubuntu1_amd64.deb \
-         main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1build2_amd64.deb \
-         main/x/xcb-util-image/libxcb-image0_0.4.0-2_amd64.deb \
-         main/x/xcb-util-keysyms/libxcb-keysyms1_0.4.0-1build3_amd64.deb \
-         main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1build3_amd64.deb \
-         main/x/xcb-util/libxcb-util1_0.4.0-1build2_amd64.deb \
-         main/libx/libxkbcommon/libxkbcommon-x11-0_1.4.0-1_amd64.deb; do
-  curl -sfo "$TMP/$(basename "$p")" "$B/$p"
-  dpkg-deb -x "$TMP/$(basename "$p")" "$TMP/x"
-done
-cp -a "$TMP"/x/usr/lib/x86_64-linux-gnu/*.so.* "$OUT/vendor/xcb-libs/"
-rm -rf "$TMP"
+echo "==> Bibliotecas xcb do Qt (Ubuntu 22.04 / jammy, conferidas por SHA-256)"
+bash "$ROOT/scripts/fetch_xcb_libs.sh" "$OUT/vendor/xcb-libs" >/dev/null
 
 echo "==> Código"
 cp -r pidgeon install.sh uninstall.sh README.md LICENSE CHANGELOG.md requirements.txt packaging "$OUT/"

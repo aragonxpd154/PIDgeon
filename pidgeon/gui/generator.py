@@ -14,7 +14,8 @@ from ..core.convert import Generator, GenConfig, FORMATS, SOURCE_KINDS, probe, n
 from ..core.netout import NetConfig, PROTOCOLS
 from ..core.remux import IsdbParams, Layer
 from ..core.names import ISDB_GUARD, ISDB_MODULATION, ISDB_CODERATE, ISDB_TIME_INTERLEAVE
-from ..core.sources import list_interfaces, is_multicast
+from ..core.sources import is_multicast
+from .netwidgets import InterfaceCombo
 from .icons import icon
 
 EXT = {"bts204": ".bts", "bts188": ".bts188.ts", "ts188": ".ts", "ts204": ".ts204", "original": ".ts"}
@@ -224,11 +225,8 @@ class GeneratorDialog(QDialog):
         self.port.setRange(1, 65535)
         self.port.setValue(1234)
         self.port.valueChanged.connect(self._update)
-        self.iface = QComboBox()
-        self.iface.addItem("Padrão do sistema (rota)", "")
-        for n, ip in list_interfaces():
-            self.iface.addItem("%s — %s" % (n, ip), n)
-        self.iface.currentIndexChanged.connect(self._update)
+        self.iface = InterfaceCombo(self, group_getter=lambda: self.host.text().strip())
+        self.iface.changed.connect(self._update)
         self.ttl = QSpinBox()
         self.ttl.setRange(1, 255)
         self.ttl.setValue(16)
@@ -357,8 +355,7 @@ class GeneratorDialog(QDialog):
         self.proto.setCurrentIndex(max(0, self.proto.findData(s.value("proto", "udp"))))
         self.host.setText(s.value("host", "239.1.1.1"))
         self.port.setValue(int(s.value("port", 1234)))
-        i = self.iface.findData(s.value("iface", ""))
-        self.iface.setCurrentIndex(max(0, i))
+        self.iface.set_value(s.value("iface", ""))
         self.ttl.setValue(int(s.value("ttl", 16)))
         self.dscp.setValue(int(s.value("dscp", 0)))
         self.pkts.setValue(int(s.value("pkts", 7)))
@@ -375,7 +372,7 @@ class GeneratorDialog(QDialog):
         for k, v in (("src", self.src.text().strip()), ("fmt", self.fmt.currentData()),
                      ("to_file", self.to_file.isChecked()), ("to_net", self.to_net.isChecked()),
                      ("proto", self.proto.currentData()), ("host", self.host.text().strip()),
-                     ("port", self.port.value()), ("iface", self.iface.currentData()), ("ttl", self.ttl.value()),
+                     ("port", self.port.value()), ("iface", self.iface.value()), ("ttl", self.ttl.value()),
                      ("dscp", self.dscp.value()), ("pkts", self.pkts.value()), ("fec_l", self.fec_l.value()),
                      ("fec_d", self.fec_d.value()), ("fec_2d", self.fec_2d.isChecked()),
                      ("loop", self.loop.isChecked()), ("out_dir", self.out_dir)):
@@ -468,7 +465,7 @@ class GeneratorDialog(QDialog):
 
     def _net_config(self):
         return NetConfig(host=self.host.text().strip(), port=self.port.value(), proto=self.proto.currentData(),
-                         iface=self.iface.currentData() or None, ttl=self.ttl.value(), dscp=self.dscp.value(),
+                         iface=self.iface.value() or None, ttl=self.ttl.value(), dscp=self.dscp.value(),
                          pkts_per_dgram=self.pkts.value(), fec_cols=self.fec_l.value(), fec_rows=self.fec_d.value(),
                          fec_2d=self.fec_2d.isChecked(), loopback=self.loopback.isChecked())
 

@@ -1,6 +1,5 @@
 """Fontes de entrada: arquivo, UDP/RTP (multicast/unicast, SSM), HTTP e stdin."""
 
-import fcntl
 import os
 import selectors
 import socket
@@ -11,44 +10,31 @@ import time
 import urllib.parse
 import urllib.request
 
-SIOCGIFADDR = 0x8915
+from . import netif
+
 IP_MULTICAST_ALL = 49
+IP_PKTINFO = getattr(socket, "IP_PKTINFO", 8)
 IP_ADD_SOURCE_MEMBERSHIP = 39
+IP_DROP_SOURCE_MEMBERSHIP = 40
 
 
 def list_interfaces():
-    """[(nome, ipv4)] das interfaces com endereço IPv4."""
-    out = []
-    try:
-        names = [n for _, n in socket.if_nameindex()]
-    except OSError:
-        names = []
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        for n in names:
-            try:
-                r = fcntl.ioctl(s.fileno(), SIOCGIFADDR, struct.pack("256s", n.encode()[:15]))
-                out.append((n, socket.inet_ntoa(r[20:24])))
-            except OSError:
-                pass
-    finally:
-        s.close()
-    return out
+    """[(nome, ipv4)] das interfaces com IPv4 (relê o kernel a cada chamada)."""
+    return netif.list_interfaces()
 
 
 def iface_ip(iface):
     """Aceita um IP ou um nome de interface (eth0, enp3s0…) e devolve o IPv4."""
     if not iface:
         return "0.0.0.0"
-    try:
-        socket.inet_aton(iface)
+    if netif.is_ipv4(iface):
         return iface
-    except OSError:
-        pass
-    for n, ip in list_interfaces():
-        if n == iface:
-            return ip
-    raise ValueError("Interface de rede '%s' não encontrada" % iface)
+    i = netif.find(iface)
+    if i is None:
+        raise ValueError("O adaptador de rede '%s' não existe nesta máquina" % iface)
+    if not i.ipv4:
+        raise ValueError("O adaptador '%s' está sem endereço IPv4" % iface)
+    return i.ipv4
 
 
 def is_multicast(ip):
@@ -229,6 +215,16 @@ class FileSource(BaseSource):
 
 
 class UdpSource(BaseSource):
+    """UDP/RTP unicast ou multicast (ASM e SSM), com FEC 2022-1 opcional.
+
+    A interface é escolhida pelo NOME do adaptador (ou automática) e o join é feito pelo índice da
+    interface. A cada 2 s o PIDgeon relê os adaptadores: se a placa trocar, sumir, voltar, mudar de IP
+    ou recuperar o cabo, o join é refeito sozinho. No automático, depois que o tráfego chega, ele trava
+    no adaptador por onde o fluxo veio (IP_PKTINFO) e sai dos outros grupos.
+    """
+
+    WATCH_PERIOD = 2.0
+
     def __init__(self, spec, analyzer):
         super().__init__(spec, analyzer)
         self.datagrams = 0
@@ -237,10 +233,21 @@ class UdpSource(BaseSource):
         self.rtp_lost = 0
         self.rtp_pt = None
         self.sock = None
+        self.socks = []           # [(socket, porta)]
+        self.joined = []          # NetIf com join ativo
+        self.locked = None        # adaptador por onde o fluxo está chegando (automático)
+        self.mode = "auto"
+        self.iface_note = ""
+        self.prepared = False
+        self.multicast = is_multicast(spec.group)
+        self._snap = None
+        self._last_watch = 0.0
+        self._carrier = {}
+        self.rejoins = 0
 
-    def _open(self, port=None, quiet=False):
+    # ------------------------------------------------------------ abertura
+    def _make_socket(self, port, bind_ip):
         sp = self.spec
-        port = port or sp.port
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -251,33 +258,235 @@ class UdpSource(BaseSource):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, sp.buffer_mb * 1024 * 1024)
         except OSError:
             pass
-        local_ip = iface_ip(sp.iface)
-        mc = is_multicast(sp.group)
-        if mc:
-            sock.bind((sp.group, port))
+        try:
+            sock.bind((bind_ip, port))
+        except PermissionError:
+            sock.close()
+            raise PermissionError("Sem permissão para abrir a porta %d: no Linux portas abaixo de 1024 exigem "
+                                  "root. Use uma porta ≥ 1024." % port)
+        except OSError as exc:
+            sock.close()
+            if exc.errno == 99:   # EADDRNOTAVAIL
+                raise OSError("O endereço %s não pertence a nenhum adaptador desta máquina" % bind_ip)
+            raise
+        if self.multicast:
             try:
                 sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
             except OSError:
                 pass
-            if sp.source:
-                # struct ip_mreq_source (Linux): multiaddr, interface, sourceaddr
-                mreq = (socket.inet_aton(sp.group) + socket.inet_aton(local_ip) +
-                        socket.inet_aton(sp.source))
-                sock.setsockopt(socket.IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP, mreq)
-            else:
-                mreq = socket.inet_aton(sp.group) + socket.inet_aton(local_ip)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            if not quiet:
-                self.an.log("IGMP join %s%s na interface %s" % (
-                    sp.group, (" (SSM fonte %s)" % sp.source) if sp.source else "", local_ip))
-        else:
-            bind_ip = sp.group if sp.group not in ("", "0.0.0.0") else local_ip
-            sock.bind((bind_ip, port))
-            if not quiet:
-                self.an.log("Escutando UDP unicast em %s:%d" % (bind_ip, port))
-        sock.settimeout(1.0)
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
+            except OSError:
+                pass
+        sock.settimeout(0.5)
         return sock
 
+    def _ports(self):
+        sp = self.spec
+        return [sp.port] + ([sp.port + 2, sp.port + 4] if sp.fec else [])
+
+    def _join(self, ifs, verb="IGMP join"):
+        sp = self.spec
+        ok = []
+        errors = []
+        for i in ifs:
+            try:
+                for sock, _port in self.socks:
+                    if sp.source:
+                        if not i.ipv4:
+                            raise OSError("o adaptador não tem IPv4 (necessário para SSM)")
+                        mreq = socket.inet_aton(sp.group) + socket.inet_aton(i.ipv4) + socket.inet_aton(sp.source)
+                        sock.setsockopt(socket.IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP, mreq)
+                    else:
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, netif.mreqn(sp.group, i.index))
+                ok.append(i)
+            except OSError as exc:
+                if exc.errno == 98:          # EADDRINUSE: já inscrito
+                    ok.append(i)
+                    continue
+                errors.append("%s: %s" % (i.name, exc.strerror or exc))
+        for i in ok:
+            self.an.log("%s %s%s em %s (%s)" % (verb, sp.group, (" (SSM fonte %s)" % sp.source) if sp.source else "",
+                                                i.name, i.ipv4 or "sem IPv4"))
+        for e in errors:
+            self.an.log("Falha no join em %s" % e, "warn")
+        return ok, errors
+
+    def _leave(self, ifs):
+        sp = self.spec
+        for i in ifs:
+            for sock, _port in self.socks:
+                try:
+                    if sp.source and i.ipv4:
+                        mreq = socket.inet_aton(sp.group) + socket.inet_aton(i.ipv4) + socket.inet_aton(sp.source)
+                        sock.setsockopt(socket.IPPROTO_IP, IP_DROP_SOURCE_MEMBERSHIP, mreq)
+                    else:
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, netif.mreqn(sp.group, i.index))
+                except OSError:
+                    pass
+
+    def prepare(self):
+        """Abre os sockets e faz o join já na chamada (erros aparecem na hora, com explicação)."""
+        if self.prepared:
+            return
+        sp = self.spec
+        if self.multicast:
+            r = netif.resolve(sp.iface, sp.group)
+            self.mode = r.mode
+            self.iface_note = r.note
+            if r.missing and not r.ifaces:
+                if r.mode == "fixed":
+                    raise OSError("Não foi possível usar a interface: %s." % r.note)
+                raise OSError("Nenhum adaptador de rede conectado com IPv4. Confira o cabo/Wi-Fi e o "
+                              "endereço do adaptador (Ajuda → Diagnóstico de rede).")
+            if r.missing:
+                self.an.log("Atenção: %s — o PIDgeon tenta o join e refaz quando o adaptador voltar" % r.note, "warn")
+            elif r.note and "não existe mais" in r.note:
+                self.an.log(r.note, "warn")
+            self.socks = [(self._make_socket(p, sp.group), p) for p in self._ports()]
+            ok, errors = self._join(r.ifaces)
+            if not ok:
+                self.close()
+                raise OSError("O join IGMP em %s falhou (%s). Confira o adaptador escolhido ou use o automático."
+                              % (sp.group, "; ".join(errors)))
+            self.joined = ok
+        else:
+            bind_ip = sp.group if sp.group not in ("", "0.0.0.0") else "0.0.0.0"
+            if bind_ip == "0.0.0.0" and sp.iface and sp.iface not in ("auto", "all", "todas"):
+                i = netif.find(sp.iface)
+                if i is None:
+                    if not netif.is_ipv4(sp.iface):
+                        raise OSError("O adaptador '%s' não existe nesta máquina" % sp.iface)
+                    self.an.log("O IP %s não existe mais nesta máquina — escutando em todos os adaptadores"
+                                % sp.iface, "warn")
+                elif i.ipv4:
+                    bind_ip = i.ipv4
+                    self.mode = "fixed"
+                    self.joined = [i]
+            self.socks = [(self._make_socket(p, bind_ip), p) for p in self._ports()]
+            self.iface_note = "todos os adaptadores" if bind_ip == "0.0.0.0" else bind_ip
+            self.an.log("Escutando UDP unicast em %s:%d" % (bind_ip, sp.port))
+        self.sock = self.socks[0][0]
+        self._snap = netif.snapshot()
+        self._carrier = {i.name: i.carrier for i in netif.interfaces()}
+        self._last_watch = time.monotonic()
+        self.prepared = True
+
+    def close(self):
+        for sock, _p in self.socks:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self.socks = []
+
+    # ------------------------------------------------------------ vigia de adaptadores
+    def iface_status(self):
+        if not self.multicast:
+            return self.iface_note or "-"
+        if self.locked is not None:
+            return "%s (%s)%s" % (self.locked.name, self.locked.ipv4 or "sem IPv4",
+                                  " · automático" if self.mode == "auto" else "")
+        if self.joined:
+            return ", ".join(i.name for i in self.joined) + (" · automático" if self.mode == "auto" else "")
+        return "aguardando adaptador"
+
+    def _watch(self, force=False):
+        now = time.monotonic()
+        if not force and now - self._last_watch < self.WATCH_PERIOD:
+            return
+        self._last_watch = now
+        snap = netif.snapshot()
+        if snap == self._snap and not force:
+            return
+        self._snap = snap
+        ifs = netif.interfaces()
+        cur = {i.name: i for i in ifs}
+        # eventos de adaptador
+        for i in ifs:
+            before = self._carrier.get(i.name)
+            if before is None:
+                self.an.log("Adaptador %s apareceu (%s)" % (i.name, i.ipv4 or "sem IPv4"))
+            elif before != i.carrier:
+                self.an.log("Adaptador %s %s" % (i.name, "conectado" if i.carrier else "sem cabo / desconectado"),
+                            "info" if i.carrier else "warn")
+        for n in self._carrier:
+            if n not in cur:
+                self.an.log("Adaptador %s foi removido" % n, "warn")
+        carrier_up = {n for n, i in cur.items() if i.carrier and not self._carrier.get(n, False)}
+        self._carrier = {n: i.carrier for n, i in cur.items()}
+        sp = self.spec
+        if not self.multicast:
+            if self.mode == "fixed" and self.joined:
+                old = self.joined[0]
+                new = cur.get(old.name)
+                if new is not None and new.ipv4 and new.ipv4 != old.ipv4:
+                    self.an.log("%s mudou de IP (%s → %s) — reabrindo a escuta" % (old.name, old.ipv4, new.ipv4))
+                    self.close()
+                    self.socks = [(self._make_socket(p, new.ipv4), p) for p in self._ports()]
+                    self.sock = self.socks[0][0]
+                    self.joined = [new]
+                    self.iface_note = new.ipv4
+            return
+        # multicast: decide o conjunto desejado
+        if self.locked is not None:
+            li = cur.get(self.locked.name)
+            if li is not None and li.index == self.locked.index and li.up and (li.carrier or self.mode == "fixed"):
+                desired = [li]
+            else:
+                self.an.log("O adaptador %s por onde o fluxo chegava não está mais disponível — procurando de novo"
+                            % self.locked.name, "warn")
+                self.locked = None
+                desired = netif.resolve(sp.iface, sp.group).ifaces
+        else:
+            r = netif.resolve(sp.iface, sp.group)
+            desired = r.ifaces
+            self.iface_note = r.note
+        old = {(i.name, i.index): i for i in self.joined}
+        new = {(i.name, i.index): i for i in desired}
+        gone = [i for k, i in old.items() if k not in new]
+        added = [i for k, i in new.items() if k not in old]
+        # cabo voltou num adaptador já inscrito: refaz o join para o switch (IGMP snooping) reaprender
+        renew = [i for k, i in new.items() if k in old and i.name in carrier_up]
+        if gone:
+            self._leave(gone)
+        if renew:
+            self._leave(renew)
+        joined = [i for k, i in old.items() if k in new and i not in renew]
+        if added or renew:
+            ok, _ = self._join(added + renew, "IGMP join refeito:" if renew else "IGMP join")
+            joined += ok
+            self.rejoins += 1
+        self.joined = [new[(i.name, i.index)] for i in joined if (i.name, i.index) in new]
+        if not self.joined:
+            self.an.log("Nenhum adaptador disponível para receber %s — aguardando" % sp.group, "warn")
+
+    def _lock(self, ifindex):
+        if self.locked is not None or len(self.joined) < 2:
+            if self.locked is None and len(self.joined) == 1:
+                self.locked = self.joined[0]
+            return
+        hit = [i for i in self.joined if i.index == ifindex]
+        if not hit:
+            return
+        self.locked = hit[0]
+        others = [i for i in self.joined if i is not hit[0]]
+        if others:
+            self._leave(others)
+            self.an.log("Fluxo chegando por %s — saindo do grupo em %s" % (hit[0].name, ", ".join(i.name for i in others)))
+        self.joined = [hit[0]]
+
+    def _recv(self, sock, buf):
+        """recv com o índice do adaptador de chegada (IP_PKTINFO) enquanto o automático não travou."""
+        if self.multicast and self.locked is None:
+            n, anc, _flags, _addr = sock.recvmsg_into([buf], 64)
+            for level, typ, data in anc:
+                if level == socket.IPPROTO_IP and typ == IP_PKTINFO and len(data) >= 4:
+                    self._lock(struct.unpack("@i", data[:4])[0])
+            return n
+        return sock.recv_into(buf)
+
+    # ------------------------------------------------------------ RTP
     def _strip_rtp(self, d):
         mode = self.spec.rtp
         if mode == "off":
@@ -309,19 +518,25 @@ class UdpSource(BaseSource):
         self.rtp_seq = seq
         return d[hdr:end]
 
+    # ------------------------------------------------------------ laços
     def loop(self):
+        self.prepare()
         if self.spec.fec:
             return self._loop_fec()
-        self.sock = self._open()
         buf = bytearray(65536)
         view = memoryview(buf)
         try:
             while not self.stop_ev.is_set():
+                self._watch()
                 try:
-                    n = self.sock.recv_into(buf)
+                    n = self._recv(self.sock, buf)
                 except socket.timeout:
                     self._signal(False)
                     continue
+                except OSError as exc:
+                    if exc.errno in (9, 88):   # socket fechado durante a troca de adaptador
+                        continue
+                    raise
                 if n <= 0:
                     continue
                 self._signal(True)
@@ -330,28 +545,31 @@ class UdpSource(BaseSource):
                 data = self._strip_rtp(bytes(view[:n]))
                 self.an.push_bytes(data, time.monotonic())
         finally:
-            self.sock.close()
-
+            self.close()
 
     def _loop_fec(self):
         """RTP com FEC SMPTE 2022-1: mídia na porta, colunas na porta+2 e linhas na porta+4."""
         from .fec import RtpFecReceiver, FecPacket, parse_rtp
         sp = self.spec
-        self.sock = self._open()
-        fec_socks = [self._open(sp.port + 2, quiet=True), self._open(sp.port + 4, quiet=True)]
         self.fec_rx = rx = RtpFecReceiver()
         self.an.log("FEC SMPTE 2022-1 ativo: colunas na porta %d, linhas na porta %d" % (sp.port + 2, sp.port + 4))
-        for s in [self.sock] + fec_socks:
-            s.setblocking(False)
-        sel = selectors.DefaultSelector()
-        sel.register(self.sock, selectors.EVENT_READ, "m")
-        for s in fec_socks:
-            sel.register(s, selectors.EVENT_READ, "f")
+        buf = bytearray(65536)
         last_report = time.monotonic()
         reported = (0, 0)
+        sel = None
+        socks_id = None
         try:
             while not self.stop_ev.is_set():
-                ev = sel.select(1.0)
+                self._watch()
+                if socks_id != [id(s) for s, _ in self.socks]:
+                    if sel is not None:
+                        sel.close()
+                    sel = selectors.DefaultSelector()
+                    for i, (s, _p) in enumerate(self.socks):
+                        s.setblocking(False)
+                        sel.register(s, selectors.EVENT_READ, "m" if i == 0 else "f")
+                    socks_id = [id(s) for s, _ in self.socks]
+                ev = sel.select(0.5)
                 if not ev:
                     self._signal(False)
                     continue
@@ -361,11 +579,12 @@ class UdpSource(BaseSource):
                 for key, _ in sorted(ev, key=lambda e: e[0].data != "m"):
                     for _ in range(256):
                         try:
-                            datagrams.append((key.data, key.fileobj.recv(65536)))
+                            n = self._recv(key.fileobj, buf) if key.data == "m" else key.fileobj.recv_into(buf)
                         except (BlockingIOError, InterruptedError):
                             break
                         except OSError:
                             break
+                        datagrams.append((key.data, bytes(buf[:n])))
                 for kind, d in datagrams:
                     if kind == "m":
                         self._signal(True)
@@ -394,9 +613,9 @@ class UdpSource(BaseSource):
                                 "(L=%s D=%s)" % (rx.recovered, rx.lost, rx.dec.L, rx.dec.D),
                                 "warn" if rx.lost else "info")
         finally:
-            self.sock.close()
-            for s in fec_socks:
-                s.close()
+            if sel is not None:
+                sel.close()
+            self.close()
 
 
 class HttpSource(BaseSource):

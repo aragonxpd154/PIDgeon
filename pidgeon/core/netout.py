@@ -8,7 +8,8 @@ import urllib.parse
 from dataclasses import dataclass
 
 from .fec import FecEncoder, rtp_header, RTP_PT_MP2T, RTP_CLOCK
-from .sources import iface_ip, is_multicast
+from . import netif
+from .sources import is_multicast
 
 PROTOCOLS = {"udp": "UDP puro", "rtp": "RTP", "rtp-fec": "RTP + FEC (SMPTE 2022-1)"}
 
@@ -18,7 +19,7 @@ class NetConfig:
     host: str
     port: int
     proto: str = "udp"            # udp | rtp | rtp-fec
-    iface: str = None             # nome (enp3s0) ou IP da interface de saída
+    iface: str = None             # nome do adaptador (enp3s0) — vazio = automático
     ttl: int = 16                 # TTL multicast (unicast usa o padrão do sistema)
     dscp: int = 0                 # DSCP (0–63); ex.: 34 = AF41, 46 = EF
     pkts_per_dgram: int = 7       # pacotes TS por datagrama (1–7)
@@ -128,18 +129,15 @@ class NetSender:
             pass
         if cfg.dscp:
             s.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, (cfg.dscp << 2) & 0xFF)
-        local = iface_ip(cfg.iface) if cfg.iface else None
         if cfg.multicast:
             s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, cfg.ttl)
             s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1 if cfg.loopback else 0)
-            if local:
-                s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local))
-        else:
-            if cfg.ttl != 16:
-                s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, cfg.ttl)
-            if local:
-                s.bind((local, 0))
+        elif cfg.ttl != 16:
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, cfg.ttl)
         self.sock = s
+        self.out_iface = None
+        self._last_resolve = 0.0
+        self._apply_iface(first=True)
         self.addr = (socket.gethostbyname(cfg.host), cfg.port)
         self.addr_col = (self.addr[0], cfg.port + 2)
         self.addr_row = (self.addr[0], cfg.port + 4)
@@ -153,12 +151,45 @@ class NetSender:
         self._last_err = 0.0
         self.log("Saída de rede: %s" % cfg.describe())
 
+    def _apply_iface(self, first=False):
+        """Escolhe o adaptador de saída pelo NOME (ou automático) e reaplica quando ele muda."""
+        cfg = self.cfg
+        self._last_resolve = time.monotonic()
+        want = cfg.iface
+        i = None
+        if want and want not in ("auto", "automático"):
+            i = netif.find(want)
+            if i is None and not netif.is_ipv4(want):
+                if first:
+                    raise ValueError("O adaptador '%s' não existe nesta máquina" % want)
+                return
+        elif cfg.multicast and netif.route_iface(cfg.host) is None:
+            # sem rota para o grupo (rede isolada, sem gateway): usa o adaptador conectado
+            cand = netif.auto_join_set(cfg.host)
+            i = cand[0] if cand else None
+        if cfg.multicast:
+            if i is not None:
+                self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, netif.mreqn("0.0.0.0", i.index))
+            elif want and netif.is_ipv4(want):
+                self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(want))
+        elif i is not None and i.ipv4 and first:
+            self.sock.bind((i.ipv4, 0))
+        if i is not None and (self.out_iface is None or i.key() != self.out_iface.key()):
+            if not first:
+                self.log("Saída agora pelo adaptador %s (%s)" % (i.name, i.ipv4 or "sem IPv4"))
+            self.out_iface = i
+
     def _sendto(self, data, addr):
         try:
             self.sock.sendto(data, addr)
             return True
         except OSError as exc:
             self.stats["errors"] += 1
+            if time.monotonic() - self._last_resolve > 2.0:
+                try:
+                    self._apply_iface()       # adaptador trocou/voltou: reaplica a interface de saída
+                except (OSError, ValueError):
+                    pass
             now = time.monotonic()
             if now - self._last_err > 5:
                 self._last_err = now

@@ -7,8 +7,12 @@
 #   /opt/pidgeon/lib/abi3     PyAV/FFmpeg para Python 3.11+ (Debian 12/13, Zorin OS 18, Ubuntu 24.04)
 #   /usr/bin/pidgeon, pidgeon-cli, pidgeon-gerar, pidgeon-enviar, pidgeon-gerar-teste
 #
-# As bibliotecas do X11/Wayland que o Qt usa vêm do apt (campo Depends), então o pacote instala
-# com:  sudo apt install ./pidgeon_<versão>_amd64.deb
+#   /opt/pidgeon/lib/xcb      bibliotecas xcb-util do Qt (as que faltam no sistema são ligadas na
+#                             instalação em /opt/pidgeon/lib/xcb-ativas — nada é baixado)
+#
+# O pacote é autocontido: só depende de bibliotecas que já vêm em qualquer desktop
+# (Python 3, Mesa/OpenGL, X11, fontconfig, GLib). Instala offline com:
+#   sudo apt install ./pidgeon_<versão>_amd64.deb      ou      sudo dpkg -i pidgeon_<versão>_amd64.deb
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -44,6 +48,9 @@ find "$STAGE/opt/pidgeon/lib" -name "__pycache__" -type d -prune -exec rm -rf {}
 rm -rf "$STAGE"/opt/pidgeon/lib/common/PySide6/{Assistant,Designer,Linguist,assistant,designer,linguist,lupdate,lrelease,qmllint,qmlformat,qmlls,qmlcachegen,qmlimportscanner,qmltyperegistrar,uic,rcc,balsam,balsamui,qsb,svgtoqml,android_deploy,android_deployqt}* 2>/dev/null || true
 python3 "$ROOT/scripts/trim_qt.py" "$STAGE/opt/pidgeon/lib/common"
 
+echo "==> Bibliotecas xcb-util do Qt (embutidas no pacote)"
+bash "$ROOT/scripts/fetch_xcb_libs.sh" "$STAGE/opt/pidgeon/lib/xcb" >/dev/null
+
 echo "==> Código"
 cp -r pidgeon "$STAGE/opt/pidgeon/app/"
 find "$STAGE/opt/pidgeon/app" -name "__pycache__" -type d -prune -exec rm -rf {} +
@@ -56,6 +63,10 @@ PY="${PIDGEON_PYTHON:-/usr/bin/python3}"
 V="$("$PY" -c 'import sys; print("%d%d" % sys.version_info[:2])')"
 if [ "$V" = 310 ]; then AV="$P/lib/cp310"; else AV="$P/lib/abi3"; fi
 export PYTHONPATH="$P/app:$P/lib/common:$AV${PYTHONPATH:+:$PYTHONPATH}"
+# bibliotecas xcb que não existiam no sistema na instalação (ligadas pelo postinst)
+if [ -d "$P/lib/xcb-ativas" ] && [ -n "$(ls -A "$P/lib/xcb-ativas" 2>/dev/null)" ]; then
+  export LD_LIBRARY_PATH="$P/lib/xcb-ativas${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 M="$1"; shift
 exec "$PY" -m $M "$@"
 EOF
@@ -92,6 +103,11 @@ Files: opt/pidgeon/lib/common/PySide6/* opt/pidgeon/lib/common/shiboken6/*
 Copyright: The Qt Company Ltd.
 License: LGPL-3.0-only
 
+Files: opt/pidgeon/lib/xcb/*
+Copyright: 2001-2010 Bart Massey, Jamey Sharp, Josh Triplett, Julien Danjou, Ran Benita and others
+License: MIT
+ Bibliotecas xcb-util e libxkbcommon-x11 dos pacotes do Ubuntu 22.04.
+
 Files: opt/pidgeon/lib/*/av/* opt/pidgeon/lib/*/av.libs/*
 Copyright: PyAV contributors; FFmpeg developers
 License: BSD-3-Clause and LGPL-2.1-or-later (FFmpeg)
@@ -108,13 +124,10 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: Marcos Santos <aragonxpd154@users.noreply.github.com>
 Installed-Size: $SIZE_KB
-Depends: python3 (>= 3.10), libegl1, libgl1, libx11-6, libx11-xcb1, libdbus-1-3, libfontconfig1, libfreetype6,
- libglib2.0-0t64 | libglib2.0-0, libwayland-client0, libwayland-cursor0, libxcb1, libxcb-cursor0,
- libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0,
- libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-util1, libxcb-xfixes0, libxcb-xkb1, libxkbcommon0,
- libxkbcommon-x11-0, zlib1g, libzstd1
-Recommends: libpulse0
-Suggests: ffmpeg
+Depends: python3 (>= 3.10), libc6 (>= 2.34), libegl1, libgl1, libx11-6, libx11-xcb1, libdbus-1-3,
+ libfontconfig1, libfreetype6, libglib2.0-0t64 | libglib2.0-0, libxcb1, libxcb-randr0, libxcb-render0,
+ libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxkbcommon0, zlib1g, libzstd1
+Suggests: ffmpeg, libpulse0, policykit-1
 Homepage: https://github.com/aragonxpd154/PIDgeon
 Description: Analisador e gerador de MPEG Transport Stream / ISDB-Tb (BTS)
  PIDgeon analisa TS 188, BTS 204 e M2TS em arquivo, UDP e RTP (multicast e
@@ -131,6 +144,15 @@ cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 set -e
 if [ "$1" = "configure" ]; then
   /usr/bin/python3 -m compileall -q /opt/pidgeon/app >/dev/null 2>&1 || true
+  # liga as bibliotecas xcb do pacote só se o sistema não tiver (nada é baixado)
+  A=/opt/pidgeon/lib/xcb-ativas
+  rm -rf "$A"; mkdir -p "$A"
+  for so in libxcb-cursor.so.0 libxcb-icccm.so.4 libxcb-image.so.0 libxcb-keysyms.so.1 \
+            libxcb-render-util.so.0 libxcb-util.so.1 libxkbcommon-x11.so.0; do
+    if ! ldconfig -p 2>/dev/null | grep -q "^[[:space:]]*$so "; then
+      for f in /opt/pidgeon/lib/xcb/$so*; do [ -e "$f" ] && ln -sf "$f" "$A/"; done
+    fi
+  done
 fi
 exit 0
 EOF
@@ -138,6 +160,7 @@ cat > "$STAGE/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set -e
 find /opt/pidgeon -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+rm -rf /opt/pidgeon/lib/xcb-ativas
 exit 0
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
@@ -148,3 +171,5 @@ echo "==> Empacotando"
 dpkg-deb --root-owner-group -Zxz -z6 --build "$STAGE" "$OUT" >/dev/null
 ls -la "$OUT"
 (cd "$ROOT/dist" && sha256sum "$(basename "$OUT")" | tee "$(basename "$OUT").sha256")
+# confere: nenhuma dependência fora do que vem em qualquer desktop
+dpkg-deb -f "$OUT" Depends

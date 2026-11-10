@@ -1,6 +1,43 @@
 # Changelog
 
-## 1.1.0 — 2026-11-09
+## 1.2.0 - 2026-11-10
+
+Adaptador de rede que acompanha a troca de placa, diagnóstico de rede e pacotes autocontidos.
+
+- **Correção: fluxo de rede não abria em outra máquina.** A janela de rede gravava o IP do adaptador
+  no endereço (`iface=192.168.x.x`) e a lista de interfaces era lida uma única vez; em outra
+  máquina, ou depois de trocar de placa, o IP não existia e o IGMP join falhava. Sem rota padrão
+  (rede isolada), o modo "padrão do sistema" também não conseguia entrar no grupo. Não era falta
+  de privilégio: receber multicast não precisa de root.
+- **Adaptador escolhido pelo nome**, com join pelo índice da interface (`ip_mreqn`): continua valendo
+  se o IP mudar. Endereços antigos com IP continuam funcionando (viram automático).
+- **Automático que acompanha a placa:** join em todos os adaptadores conectados (um por sub-rede,
+  cabo antes de Wi-Fi), trava no adaptador por onde o fluxo chega (`IP_PKTINFO`) e, a cada 2 s,
+  refaz o join se a placa for trocada, removida, perder o cabo ou mudar de IP - sem reabrir o fluxo.
+- **Adaptador fixo** espera a placa voltar (ex.: USB desplugada) e refaz o join quando o cabo volta,
+  para o switch com IGMP snooping reaprender a porta.
+- **Lista de adaptadores ao vivo** nas janelas de rede e de geração (atualiza a cada 2 s), com IP,
+  tipo (cabo, USB, Wi-Fi, VLAN, bond, bridge), velocidade e estado; VLANs, bonds e bridges contam
+  como rede real.
+- **Erros na hora e explicados:** o socket e o join são feitos ao clicar em Abrir; adaptador
+  inexistente, porta abaixo de 1024 ou nenhum adaptador conectado aparecem numa mensagem com
+  botão para o diagnóstico.
+- **Novo: Diagnóstico de rede** (Início → Diagnóstico, `pidgeon-cli --diagnostico`): adaptadores,
+  tráfego chegando em cada placa, grupos IGMP inscritos (`/proc/net/igmp`), rota padrão,
+  `rp_filter` (com botão para corrigir via `pkexec`, opcionalmente permanente) e firewall
+  ufw/firewalld com o comando para liberar a porta. `pidgeon-cli --interfaces` lista os adaptadores.
+- Barra de status mostra o adaptador em uso; a aba TS mostra o adaptador e os joins refeitos.
+- Transmissão (`pidgeon-gerar` / Gerar / Tx) também escolhe o adaptador de saída pelo nome, usa o
+  adaptador conectado quando não há rota para o grupo e reaplica a interface se a placa mudar.
+- **Correção no remux TS → BTS:** em picos de taxa do vídeo (quadros I) o intervalo de PCR podia
+  passar de 40 ms (TR 101 290 2.3a). O remux agora insere pacotes só com PCR (adaptation field)
+  quando um PID ficaria mais de 30 ms sem PCR.
+- **Pacote .deb autocontido:** as bibliotecas xcb-util do Qt vão dentro do pacote (conferidas por
+  SHA-256 no build) e só são usadas se faltarem no sistema; o .deb depende apenas do que já vem em
+  qualquer desktop e instala sem internet (`sudo dpkg -i`). O .zip continua offline e sem sudo.
+- 9 testes novos (troca de placa, cabo, adaptador inexistente, IP antigo, diagnóstico) - 45 no total.
+
+## 1.1.0 - 2026-11-09
 
 Gerador e transmissor de BTS / TS a partir de gravações.
 
@@ -26,7 +63,7 @@ Gerador e transmissor de BTS / TS a partir de gravações.
 - 20 testes novos: Reed-Solomon, quadro ISDB-T, IIP, todas as conversões com TR 101 290 zerada,
   FEC com perdas simuladas, saída UDP/RTP/FEC e CLI.
 
-## 1.0.0 — 2026-10-27
+## 1.0.0 - 2026-10-27
 
 Primeira versão.
 

@@ -58,10 +58,16 @@ jobs:
         with:
           name: pacotes
           path: dist
-      - name: Instala o .deb com o apt
+      - name: O .deb não pode depender das bibliotecas que ele mesmo embute
+        run: |
+          D="$(dpkg-deb -f dist/pidgeon_*_amd64.deb Depends)"; echo "$D"
+          ! echo "$D" | grep -Eq "libxcb-(cursor|icccm|image|keysyms|render-util|util)|libxkbcommon-x11"
+      - name: Instala o .deb
         run: |
           sudo apt-get update -q
+          sudo apt-get install -y -q xvfb
           sudo apt-get install -y -q ./dist/pidgeon_*_amd64.deb
+          ls /opt/pidgeon/lib/xcb-ativas/
       - name: Comandos instalados
         run: |
           pidgeon --version
@@ -70,6 +76,19 @@ jobs:
           pidgeon-gerar /tmp/t.ts204 -f bts204 -o /tmp/remux.bts -q
           pidgeon-cli /tmp/remux.bts | tee /tmp/rel.txt
           ! grep -q "\[ERR\]" /tmp/rel.txt
+      - name: Interface em X11 real (Xvfb, com as bibliotecas do pacote)
+        run: |
+          cat > /tmp/xcbcheck.py <<'EOF'
+          from PySide6.QtWidgets import QApplication
+          from PySide6.QtCore import QTimer
+          app = QApplication([])
+          assert app.platformName() == "xcb", app.platformName()
+          from pidgeon.gui.main_window import MainWindow
+          w = MainWindow(); w.show()
+          QTimer.singleShot(1500, app.quit); app.exec(); print("X11 OK")
+          EOF
+          QT_QPA_PLATFORM=xcb PYTHONPATH=/tmp timeout 60 xvfb-run -a /opt/pidgeon/bin/pidgeon-run xcbcheck
+          pidgeon-cli --interfaces
       - name: Interface (offscreen)
         run: |
           QT_QPA_PLATFORM=offscreen timeout 20 /opt/pidgeon/bin/pidgeon-run pidgeon.gui.app --version

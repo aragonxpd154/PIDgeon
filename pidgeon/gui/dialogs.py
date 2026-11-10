@@ -4,14 +4,15 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QFormLayout, QComboBox, QLineEdit, QSpinBox, QDialogButtonBox,
                                QVBoxLayout, QLabel, QHBoxLayout, QWidget, QCheckBox)
 
-from ..core.sources import list_interfaces, SourceSpec
+from ..core.sources import SourceSpec
+from .netwidgets import InterfaceCombo, NetDiagDialog
 
 
 class NetworkDialog(QDialog):
     def __init__(self, parent=None, recent=None):
         super().__init__(parent)
         self.setWindowTitle("Abrir fluxo de rede")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(680)
         lay = QVBoxLayout(self)
         form = QFormLayout()
         self.recent = QComboBox()
@@ -31,11 +32,8 @@ class NetworkDialog(QDialog):
         self.port.setRange(1, 65535)
         self.port.setValue(1234)
         form.addRow("Porta", self.port)
-        self.iface = QComboBox()
-        self.iface.addItem("Padrão do sistema", "")
-        for n, ip in list_interfaces():
-            self.iface.addItem("%s — %s" % (n, ip), ip)
-        form.addRow("Interface de rede", self.iface)
+        self.iface = InterfaceCombo(self, group_getter=lambda: self.addr.text().strip())
+        form.addRow("Adaptador de rede", self.iface)
         self.source = QLineEdit()
         self.source.setPlaceholderText("opcional — IP da fonte para multicast SSM (IGMPv3)")
         form.addRow("Fonte (SSM)", self.source)
@@ -55,11 +53,14 @@ class NetworkDialog(QDialog):
         self.preview.setStyleSheet("font-family: monospace; padding: 6px;")
         lay.addWidget(self.preview)
         hint = QLabel("O tamanho do pacote (188 / 204 BTS / 192) e o encapsulamento RTP são detectados "
-                      "automaticamente. Para multicast, o PIDgeon faz o IGMP join na interface escolhida.")
+                      "automaticamente. No multicast, o PIDgeon faz o IGMP join no adaptador escolhido e, no "
+                      "automático, acompanha a troca de placa, de cabo ou de IP sem precisar reabrir.")
         hint.setWordWrap(True)
         lay.addWidget(hint)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Abrir")
+        diag = bb.addButton("Diagnóstico de rede…", QDialogButtonBox.HelpRole)
+        diag.clicked.connect(self._diag)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
@@ -68,8 +69,8 @@ class NetworkDialog(QDialog):
         for w in (self.port, self.buffer):
             w.valueChanged.connect(self._update)
         self.fec.toggled.connect(self._update)
-        for w in (self.proto, self.iface):
-            w.currentIndexChanged.connect(self._update)
+        self.proto.currentIndexChanged.connect(self._update)
+        self.iface.changed.connect(self._update)
         self._update()
 
     def _load_recent(self, idx):
@@ -90,10 +91,10 @@ class NetworkDialog(QDialog):
         self.source.setText(sp.source or "")
         self.buffer.setValue(sp.buffer_mb)
         self.fec.setChecked(sp.fec)
-        if sp.iface:
-            i = self.iface.findData(sp.iface)
-            if i >= 0:
-                self.iface.setCurrentIndex(i)
+        self.iface.set_value(sp.iface or "")
+
+    def _diag(self):
+        NetDiagDialog(self, self.addr.text().strip(), self.port.value(), self.iface.value()).exec()
 
     def value(self):
         if self.proto.currentIndex() == 3:
@@ -105,8 +106,8 @@ class NetworkDialog(QDialog):
             scheme = "rtp"
         url = "%s://%s%s:%d" % (scheme, (src + "@") if src else "", host, self.port.value())
         q = []
-        if self.iface.currentData():
-            q.append("iface=%s" % self.iface.currentData())
+        if self.iface.value():
+            q.append("iface=%s" % self.iface.value())
         if self.proto.currentIndex() == 1:
             q.append("rtp=off")
         if self.fec.isChecked() and self.fec.isEnabled():
